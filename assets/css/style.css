@@ -148,7 +148,10 @@ html:not(.entered) .chrome * { pointer-events: none; }
 .album__body .soon { font: 400 19px/1.5 var(--disp); color: var(--ink); }
 .album__body .src { font-size: 11px; color: var(--ink-3); margin-top: -4px; }
 .album__body .ctas { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
-.moonnote { position: absolute; left: 68vw; transform: translateX(-50%); bottom: 10vh; margin: 0; font-size: 11.5px; color: var(--ink-3); }
+.moonhint { position: absolute; left: 68vw; top: calc(47vh + min(30vh, 19vw) + 18px); transform: translateX(-50%); margin: 0; display: grid; justify-items: center; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.moonhint small { font-size: 10.5px; color: var(--ink-3); }
+.cta svg { width: 12px; height: 12px; fill: currentColor; margin-inline-end: 7px; transform: scaleX(-1); }
+.offscreen-video { position: fixed; left: 0; top: 0; width: 2px; height: 2px; opacity: 0; pointer-events: none; z-index: -1; }
 
 /* ---------- ۲ · آثار ---------- */
 .panel--work .no { position: absolute; left: 6vw; top: 14vh; }
@@ -311,7 +314,9 @@ html:not(.entered) .chrome * { pointer-events: none; }
 .viewer { position: fixed; inset: 0; z-index: 50; background: rgba(5, 5, 5, .95); display: grid; place-items: center; }
 .viewer[hidden] { display: none; }
 .viewer__fig { margin: 0; display: grid; justify-items: center; gap: 12px; max-width: 92vw; }
-.viewer__media img { max-width: 86vw; max-height: 80vh; width: auto; height: auto; object-fit: contain; }
+.viewer__media img, .viewer__media video { max-width: 86vw; max-height: 80vh; width: auto; height: auto; object-fit: contain; display: block; }
+.viewer__media video { width: min(86vw, 142vh); background: #000; }
+.viewer--single .viewer__nav { display: none; }
 .viewer figcaption { font-size: 12.5px; color: var(--ink-2); text-align: center; max-width: 70ch; }
 .viewer__close { position: absolute; top: 14px; left: 18px; font-size: 34px; line-height: 1; padding: 6px 12px; color: var(--ink-2); }
 .viewer__nav { position: absolute; top: 50%; transform: translateY(-50%); font-size: 46px; color: var(--ink-3); padding: 16px; }
@@ -385,7 +390,7 @@ html:not(.entered) .chrome * { pointer-events: none; }
   .album__body p:not(.soon):not(.src):not(.ctas) { display: none; }
   .album__body .soon { font-size: 15px; }
   .album__body .cta { font-size: 11.5px; padding: 8px 11px 9px; }
-  .moonnote { display: none; }
+  .moonhint { left: 50%; top: calc(25vh + min(31vw, 17vh) + 8px); font-size: 11px; }
 
   .panel--work .no { top: 62px; left: 20px; }
   .work__text { left: 22px; right: 22px; width: auto; top: 50vh; transform: none; }

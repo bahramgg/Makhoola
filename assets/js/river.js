@@ -28,14 +28,14 @@ precision mediump float; varying vec4 vCol;
 void main() {
   vec2 d = gl_PointCoord - 0.5; float r = dot(d, d);
   if (r > 0.25) discard;
-  gl_FragColor = vec4(vCol.rgb, vCol.a * smoothstep(0.25, 0.15, r));
+  gl_FragColor = vec4(vCol.rgb, vCol.a * (1.0 - smoothstep(0.15, 0.25, r)));
 }`;
   // تصویر واقعی زیر ذره‌ها با حل‌شدن دانه‌دانه ظاهر می‌شود
   const RVS = `
 attribute vec2 aQ; uniform vec4 uBox; uniform vec2 uRes; varying vec2 vUv;
 void main() { vUv = aQ; vec2 p = uBox.xy + aQ * uBox.zw; vec2 z = p / uRes * 2.0 - 1.0; gl_Position = vec4(z.x, -z.y, 0.0, 1.0); }`;
   const RFS = `
-precision mediump float; varying vec2 vUv; uniform sampler2D uTex; uniform float uReveal; uniform float uAlpha; uniform float uSeed;
+precision mediump float; varying vec2 vUv; uniform sampler2D uTex; uniform float uReveal; uniform float uAlpha; uniform float uSeed; uniform float uCircle;
 float h(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7)) + uSeed) * 43758.5453); }
 float n(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
   return mix(mix(h(i), h(i + vec2(1, 0)), f.x), mix(h(i + vec2(0, 1)), h(i + vec2(1, 1)), f.x), f.y); }
@@ -43,6 +43,7 @@ void main() {
   float m = n(vUv * 7.0) * 0.6 + n(vUv * 31.0) * 0.28 + h(vUv * 900.0) * 0.12;
   float a = smoothstep(m - 0.05, m + 0.05, uReveal * 1.12 - 0.06);
   vec2 e = min(vUv, 1.0 - vUv); float edge = smoothstep(0.0, 0.035, min(e.x, e.y));
+  if (uCircle > 0.5) edge = 1.0 - smoothstep(0.47, 0.5, distance(vUv, vec2(0.5)));
   vec4 tx = texture2D(uTex, vUv);
   gl_FragColor = vec4(tx.rgb, tx.a * a * uAlpha * edge);
 }`;
@@ -158,7 +159,7 @@ void main() {
       gl.bindBuffer(gl.ARRAY_BUFFER, this.b.quad); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
       const R = this.pR;
       this.ra = { q: gl.getAttribLocation(R, 'aQ') };
-      this.ru = { box: gl.getUniformLocation(R, 'uBox'), res: gl.getUniformLocation(R, 'uRes'), tex: gl.getUniformLocation(R, 'uTex'), reveal: gl.getUniformLocation(R, 'uReveal'), alpha: gl.getUniformLocation(R, 'uAlpha'), seed: gl.getUniformLocation(R, 'uSeed') };
+      this.ru = { box: gl.getUniformLocation(R, 'uBox'), res: gl.getUniformLocation(R, 'uRes'), tex: gl.getUniformLocation(R, 'uTex'), reveal: gl.getUniformLocation(R, 'uReveal'), alpha: gl.getUniformLocation(R, 'uAlpha'), seed: gl.getUniformLocation(R, 'uSeed'), circle: gl.getUniformLocation(R, 'uCircle') };
       gl.enable(gl.BLEND); gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.disable(gl.DEPTH_TEST);
     }
@@ -288,8 +289,8 @@ void main() {
       gl.useProgram(this.pP);
       gl.uniform2f(this.u.res, this.W, this.H); gl.uniform1f(this.u.dpr, this.dpr); gl.uniform1f(this.u.time, t);
       gl.uniform4f(this.u.light, this.light[0], this.light[1], this.light[2], this.light[3]);
-      const rv = Math.max(A.reveal ? A.reveal.a : 0, B.reveal ? B.reveal.a : 0);
-      gl.uniform1f(this.u.fade, this.fade * (1 - 0.62 * rv));
+      const ra = A.reveal ? A.reveal.a * (A.reveal.fade || 0.62) : 0, rb = B.reveal ? B.reveal.a * (B.reveal.fade || 0.62) : 0;
+      gl.uniform1f(this.u.fade, this.fade * (1 - Math.max(ra, rb)));
       gl.bindBuffer(gl.ARRAY_BUFFER, this.b.pos); gl.bufferSubData(gl.ARRAY_BUFFER, 0, px);
       gl.enableVertexAttribArray(this.a.pos); gl.vertexAttribPointer(this.a.pos, 2, gl.FLOAT, false, 0, 0);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.b.col); gl.bufferSubData(gl.ARRAY_BUFFER, 0, cb);
@@ -305,6 +306,13 @@ void main() {
       const r = F.reveal;
       if (!r || !r.tex || r.a < 0.003 || !F.b) return;
       const gl = this.gl;
+      let tex = r.tex;
+      const v = r.video;
+      if (v && v.readyState >= 2 && !v.paused && v.videoWidth) {
+        if (!r.vtex) r.vtex = this.texture(v);
+        else { gl.bindTexture(gl.TEXTURE_2D, r.vtex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v); }
+        tex = r.vtex;
+      } else if (v && r.vtex && v.readyState >= 2) tex = r.vtex;
       gl.useProgram(this.pR);
       for (const k in this.a) gl.disableVertexAttribArray(this.a[k]);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.b.quad);
@@ -312,7 +320,8 @@ void main() {
       const b = r.box ? r.box(F.b) : F.b;
       gl.uniform4f(this.ru.box, b.x, b.y, b.w, b.h);
       gl.uniform2f(this.ru.res, this.W, this.H);
-      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, r.tex); gl.uniform1i(this.ru.tex, 0);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(this.ru.tex, 0);
+      gl.uniform1f(this.ru.circle, r.circle ? 1 : 0);
       gl.uniform1f(this.ru.reveal, r.a); gl.uniform1f(this.ru.alpha, (r.alpha || 0.92) * on * this.fade); gl.uniform1f(this.ru.seed, r.seed || 0);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       gl.disableVertexAttribArray(this.ra.q);

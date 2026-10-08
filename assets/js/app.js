@@ -79,12 +79,25 @@
     ? [W * (0.5 + 0.3 * Math.sin(u * Math.PI * 2 * 1.25 + 0.5)), H * (0.24 + 0.68 * u)]
     : [W * (0.92 - 0.84 * u), H * (0.6 + 0.16 * Math.sin(u * Math.PI * 2 * 1.1 + 0.3) + 0.05 * Math.sin(u * Math.PI * 2 * 3.2 + 1))];
 
+  const moonVideo = document.createElement('video');
+  moonVideo.muted = true; moonVideo.loop = true; moonVideo.playsInline = true; moonVideo.preload = 'none';
+  moonVideo.setAttribute('muted', ''); moonVideo.setAttribute('playsinline', ''); moonVideo.setAttribute('aria-hidden', 'true');
+  moonVideo.className = 'offscreen-video';
+  // اگر مرورگر H.264 ندارد، نسخه‌ی WebM
+  moonVideo.src = 'assets/video/nemikaham-moon.' + (moonVideo.canPlayType('video/mp4; codecs="avc1.4D401E"') ? 'mp4' : 'webm');
+  document.body.appendChild(moonVideo);
+
   const pending = [];
   function build(i) {
     const s = STEPS[i];
     switch (s.kind) {
       case 'emblem': return emblem;
-      case 'moon': { const f = MK.formMoon(N, null); f.box = boxFor('moon'); return f; }
+      case 'moon': {
+        const f = MK.formMoon(N, null); f.box = boxFor('moon');
+        // تیزر آلبوم درون ماه؛ تا ویدیو آماده نشده، خود ماه
+        f.reveal.video = moonVideo; f.reveal.circle = true; f.reveal.fade = 0.82; f.reveal.alpha = 1;
+        return f;
+      }
       case 'streams': return MK.formStreams(N, STREAM_LANES);
       case 'path': return MK.formPath(N, PATH);
       case 'dust': { const f = MK.formDust(N); f.alpha = 1; return f; }
@@ -357,6 +370,7 @@
       root.classList.toggle('on-glyph', k >= 0 && !!glyphs[k].go);
     }
     if (STEPS[cur] && STEPS[cur].kind === 'dust') setLight(e.clientX, e.clientY);
+    if (STEPS[cur] && STEPS[cur].kind === 'moon') { const f = forms[cur]; root.classList.toggle('on-glyph', !!(f && f.b && Math.hypot(P.x - (f.b.x + f.b.w / 2), P.y - (f.b.y + f.b.h / 2)) < f.b.w / 2)); }
   }, { passive: true });
   addEventListener('pointerleave', () => { P.on = false; root.classList.remove('has-cursor'); });
   document.addEventListener('pointerout', (e) => { if (!e.relatedTarget) { P.on = false; root.classList.remove('has-cursor'); } });
@@ -383,6 +397,10 @@
       const b = emblem.b;
       if (b && x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) { [0, 4, 7].forEach((n, j) => MK.sound.pluck(n, 0.5, j * 0.06)); river.shock(x, y, 9, 260); }
       return;
+    }
+    if (s.kind === 'moon') {
+      const f = forms[cur];
+      if (f && f.b && Math.hypot(x - (f.b.x + f.b.w / 2), y - (f.b.y + f.b.h / 2)) < f.b.w / 2) { openViewer('teaser', 0); return; }
     }
     if (s.kind === 'rooster') {
       const f = forms[cur];
@@ -576,7 +594,8 @@
   let vList = [], vI = 0, vKind = '', vBack = null;
   function openViewer(kind, k) {
     vKind = kind; vBack = document.activeElement;
-    vList = kind === 'show' ? DATA.shows.map((s, i) => ({ s, i })).filter((x) => x.s.p) : DATA.photos.map((p, i) => ({ p, i }));
+    vList = kind === 'show' ? DATA.shows.map((s, i) => ({ s, i })).filter((x) => x.s.p) : kind === 'teaser' ? [{ i: 0 }] : DATA.photos.map((p, i) => ({ p, i }));
+    viewer.classList.toggle('viewer--single', vList.length < 2);
     vI = Math.max(0, vList.findIndex((x) => x.i === k));
     renderViewer();
     viewer.hidden = false; root.classList.add('viewing');
@@ -585,12 +604,25 @@
   function renderViewer() {
     const it = vList[vI];
     let src, cap;
+    if (vKind === 'teaser') {
+      vMedia.innerHTML = '<video poster="assets/video/nemikaham-teaser.webp" controls autoplay playsinline><source src="assets/video/nemikaham-teaser.mp4" type="video/mp4"><source src="assets/video/nemikaham-teaser.webm" type="video/webm"></video>';
+      vCap.textContent = 'تیزر آلبوم «نمی‌کاهم» · ویدیو: هومن فاخته · کانال تلگرام ماخولا، ۱۵ مهر ۱۴۰۵';
+      if (MK.sound.on) { MK.sound.set(false); syncSound(); viewer._sound = true; }
+      const v = $('video', vMedia); v.play().catch(() => {});
+      return;
+    }
     if (vKind === 'show') { const s = it.s; src = s.p + '.webp'; cap = [DATA.city[s.c] + '، ' + s.d, s.v, s.n, s.s].filter(Boolean).join(' · '); }
     else { src = it.p.s; cap = it.p.c; }
     vMedia.innerHTML = `<img src="${src}" alt="${cap.replace(/"/g, '&quot;')}">`;
     vCap.textContent = cap;
   }
-  function closeViewer() { viewer.hidden = true; root.classList.remove('viewing'); if (vBack) vBack.focus({ preventScroll: true }); }
+  function closeViewer() {
+    viewer.hidden = true; root.classList.remove('viewing');
+    vMedia.innerHTML = '';
+    if (viewer._sound) { viewer._sound = false; MK.sound.set(true); syncSound(); }
+    if (vBack) vBack.focus({ preventScroll: true });
+  }
+  $$('[data-teaser]').forEach((b) => b.addEventListener('click', () => openViewer('teaser', 0)));
   $('.viewer__close', viewer).addEventListener('click', closeViewer);
   $('.viewer__prev', viewer).addEventListener('click', () => { vI = (vI - 1 + vList.length) % vList.length; renderViewer(); });
   $('.viewer__next', viewer).addEventListener('click', () => { vI = (vI + 1) % vList.length; renderViewer(); });
@@ -659,6 +691,10 @@
       const want = i === rI && settle > 0.9 ? 1 : 0;
       r.a += (want - r.a) * (want ? Math.min(1, dt * 1.5) : Math.min(1, dt * 5));
     }
+    // ویدیوی ماه فقط وقتی فصلش نزدیک است پخش می‌شود
+    const nearMoon = entered && !idle && Math.abs(pos - byId.nemikaham) < 0.9 && viewer.hidden;
+    if (nearMoon && moonVideo.paused) { if (moonVideo.preload !== 'auto') moonVideo.preload = 'auto'; moonVideo.play().catch(() => {}); }
+    else if (!nearMoon && !moonVideo.paused) moonVideo.pause();
     // محافظ صفحه
     if (!idle && entered && !modalOpen() && now() - lastInput > 45000 && !$('iframe', screenEl)) {
       idle = true; dvd.reset(); river.override = dvd; root.classList.add('idle');
