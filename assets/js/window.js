@@ -188,6 +188,44 @@ uniform sampler2D uTex;
 uniform float uMem;
 void main() { o = vec4(0.0, 0.0, 0.0, texture(uTex, vUv).a * uMem); }`;
 
+// Calligraphy written into the fog. R = glyph coverage, G = when the reed reaches the pixel.
+// uKind 1 draws the play mark (a rounded triangle) instead of a mask.
+const GLYPH_FS = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 o;
+uniform sampler2D uTex;
+uniform int uMode, uKind;
+uniform float uTau, uSoft, uMem, uWet;
+float sdTri(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
+  vec2 e0 = p1 - p0, e1 = p2 - p1, e2 = p0 - p2;
+  vec2 v0 = p - p0, v1 = p - p1, v2 = p - p2;
+  vec2 q0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+  vec2 q1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+  vec2 q2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+  float s = sign(e0.x * e2.y - e0.y * e2.x);
+  vec2 d = min(min(vec2(dot(q0, q0), s * (v0.x * e0.y - v0.y * e0.x)),
+                   vec2(dot(q1, q1), s * (v1.x * e1.y - v1.y * e1.x))),
+                   vec2(dot(q2, q2), s * (v2.x * e2.y - v2.y * e2.x)));
+  return -sqrt(d.x) * sign(d.y);
+}
+void main() {
+  float cov, t;
+  if (uKind == 1) {
+    vec2 p = vUv * 2.0 - 1.0;
+    float d = sdTri(p, vec2(-0.6, -0.78), vec2(-0.6, 0.78), vec2(0.78, 0.0)) - 0.08;
+    cov = 1.0 - smoothstep(-0.035, 0.035, d);
+    t = vUv.x;
+  } else {
+    vec2 g = texture(uTex, vUv).rg;
+    cov = g.r;
+    t = g.g;
+  }
+  float c = cov * smoothstep(t, t + uSoft, uTau);
+  if (uMode == 0) o = vec4(vec2(1.0 - c), 1.0, 1.0);
+  else o = vec4(0.0, 0.0, c * uWet, c * uMem);
+}`;
+
 const COMP_FS = `#version 300 es
 precision highp float;
 in vec2 vUv;
@@ -238,8 +276,10 @@ void main() {
   vec2 px = vec2(uv.x, 1.0 - uv.y) * uView;
   vec4 F = texture(uFog, uv);
   float M = F.a;
-  float fog = F.r * (1.0 - 0.6 * smoothstep(0.55, 1.0, M));
-  float breath = clamp(F.g * (1.0 - 0.96 * smoothstep(0.17, 0.4, M)), 0.0, 1.0);
+  float greasy = smoothstep(0.17, 0.4, M);
+  // breath on greasy glass forms a clear film, so old writing shows up dark inside the cloud
+  float fog = F.r * (1.0 - 0.92 * smoothstep(0.55, 1.0, M)) * (1.0 - 0.8 * greasy * clamp(F.g * 1.6, 0.0, 1.0));
+  float breath = clamp(F.g * (1.0 - 0.96 * greasy), 0.0, 1.0);
   float dens = clamp(fog + breath, 0.0, 1.0);
   float nLow = texture(uNoise, px / 1100.0).r;
   float nMid = texture(uNoise, px / 280.0 + 0.31).a;
@@ -271,7 +311,7 @@ void main() {
   // the inner surface: condensation, lit by the room and by the night behind it
   vec3 glow = outsideSoft(uv, 4.7);
   float gl = dot(glow, vec3(0.3, 0.59, 0.11));
-  vec3 room = vec3(0.066, 0.073, 0.082) * (0.75 + 0.5 * nLow);
+  vec3 room = vec3(0.074, 0.081, 0.09) * (0.75 + 0.5 * nLow);
   vec3 fogCol = room + mix(glow, vec3(gl), 0.3) * 1.38;
   fogCol += warm * lamp * (0.15 + 0.16 * beads * beads * beads) * flick;
   fogCol *= 0.97 + 0.06 * beads * (1.0 - 0.6 * breath);
@@ -494,6 +534,7 @@ async function start() {
     drop: program(DROP_VS, DROP_FS),
     copy: program(FULL_VS, COPY_FS, { uTex: 0 }),
     mask: program(MASK_VS, MASK_FS, { uTex: 0 }),
+    glyph: program(MASK_VS, GLYPH_FS, { uTex: 0 }),
     comp: program(FULL_VS, COMP_FS, { uScene: 0, uNoise: 1, uRain: 2, uDrip: 3, uFog: 4 }),
   };
   const empty = gl.createVertexArray();
@@ -666,61 +707,49 @@ async function start() {
 
   /* --------------------------------------------------------------- data */
 
-  let letters = null;
+  let glass = null; // calligraphy masks: aspect, margin, length, drip points
+  const glassTex = {};
   const emblemImg = loadImage('assets/img/brand/emblem.svg').catch(() => null);
 
   /* ------------------------------------------------------------- layout */
 
+  const EMBLEM_A = 552 / 702;
   let L = {};
   let portrait = false;
 
-  function inkBox(ops) {
-    let x0 = Infinity;
-    let y0 = Infinity;
-    let x1 = -Infinity;
-    let y1 = -Infinity;
-    for (const op of ops) {
-      const pts = op.pts || [op.dot];
-      for (const p of pts) {
-        x0 = Math.min(x0, p[0]);
-        y0 = Math.min(y0, p[1]);
-        x1 = Math.max(x1, p[0]);
-        y1 = Math.max(y1, p[1]);
-      }
-    }
-    return { x0, y0, x1, y1 };
-  }
-
   function layout() {
     portrait = H > W * 1.05;
-    const a = (k) => letters[k].a;
+    const a = (k) => glass[k].a;
     const u = Math.min(W, H);
     L = {};
     if (portrait) {
-      const h = Math.min(H * 0.26, (W * 0.84) / a('name'));
-      L.name = { cx: W * 0.5, cy: H * 0.37, h, angle: -0.06 };
-      const ha = h * 0.37;
-      L.album = { cx: W * 0.6, cy: L.name.cy + h * 0.52 + ha * 0.95, h: ha, angle: 0.05 };
-      L.emblem = { cx: W * 0.5, cy: H * 0.79, h: Math.min(H * 0.17, W * 0.4) };
-      L.breathe = { cx: W * 0.5, cy: H * 0.79 + Math.min(H * 0.17, W * 0.4) * 0.5 + 34, h: 50, angle: 0.03 };
-      L.hidden = { cx: W * 0.5, cy: H * 0.12, h: Math.min(44, (W * 0.8) / a('v4')), angle: -0.03 };
+      const eh = Math.min(H * 0.4, (W * 0.78) / EMBLEM_A);
+      L.emblem = { cx: W * 0.5, cy: H * 0.34, h: eh };
+      const ah = clamp(H * 0.085, 54, 90);
+      L.album = { cx: W * 0.58, cy: L.emblem.cy + eh * 0.5 + ah * 0.95, h: ah, angle: 0.03 };
+      L.hidden = { cx: W * 0.5, cy: H * 0.78, h: Math.min(40, (W * 0.8) / a('v4')), angle: -0.03 };
+      L.breathe = { cx: W * 0.5, cy: H * 0.86, h: 44, angle: 0.02 };
     } else {
-      const h = Math.min(H * 0.41, (W * 0.5) / a('name'));
-      L.name = { cx: W * 0.57, cy: H * 0.43, h, angle: -0.05 };
-      const ha = h * 0.33;
-      L.album = { cx: L.name.cx - h * a('name') * 0.3, cy: L.name.cy + h * 0.5 + ha * 0.82, h: ha, angle: 0.04 };
-      L.emblem = { cx: W * 0.165, cy: H * 0.37, h: H * 0.4 };
-      L.breathe = { cx: W * 0.165, cy: H * 0.37 + H * 0.2 + 52, h: Math.max(56, H * 0.085), angle: 0.04 };
-      L.hidden = { cx: W * 0.76, cy: H * 0.86, h: Math.max(40, H * 0.055), angle: -0.03 };
+      const eh = Math.min(H * 0.66, (W * 0.42) / EMBLEM_A);
+      L.emblem = { cx: W * 0.6, cy: H * 0.46, h: eh };
+      const ah = clamp(H * 0.25, 100, 260);
+      const aw = ah * a('album');
+      L.album = { cx: Math.max(aw / 2 + W * 0.05, L.emblem.cx - (eh * EMBLEM_A) / 2 - aw / 2 - W * 0.035), cy: L.emblem.cy + eh * 0.16, h: ah, angle: 0.02 };
+      const hh = Math.max(44, H * 0.07);
+      L.hidden = { cx: W * 0.27, cy: H * 0.2, h: hh, angle: -0.03 };
+      L.breathe = { cx: W * 0.27, cy: H * 0.2 + hh * 0.5 + 54, h: Math.max(48, H * 0.065), angle: 0.03 };
     }
     const albumW = L.album.h * a('album');
-    L.play = { cx: L.album.cx - albumW / 2 - L.album.h * 0.62, cy: L.album.cy + L.album.h * 0.08, h: L.album.h * 0.5, angle: 0.02 };
-    const ui = clamp(u * 0.032, 17, 27);
-    L.handle = { cx: 18 + (ui * a('handle')) / 2, cy: H - 20 - ui / 2, h: ui, angle: -0.02 };
-    L.sound = { cx: W - 20 - (ui * 1.25 * a('sound')) / 2, cy: H - 20 - (ui * 1.25) / 2, h: ui * 1.25, angle: 0.04 };
+    L.play = portrait
+      ? { cx: L.album.cx - albumW / 2 - L.album.h * 0.62, cy: L.album.cy + L.album.h * 0.06, h: L.album.h * 0.44, angle: 0 }
+      : { cx: L.album.cx + albumW * 0.12, cy: L.album.cy + L.album.h * 0.82, h: L.album.h * 0.24, angle: 0 };
+    const ui = clamp(u * 0.03, 16, 24);
+    L.handle = { cx: 18 + (ui * a('handle')) / 2, cy: H - 18 - ui / 2, h: ui, angle: 0 };
+    const sh = ui * 1.7;
+    L.sound = { cx: W - 18 - (sh * a('sound')) / 2, cy: H - 16 - sh / 2, h: sh, angle: 0 };
     L.lamp = portrait ? [W * 0.86, H * 0.1] : [W * 0.82, H * 0.2];
-    const emW = L.emblem.h * (552 / 702);
-    L.emblemRect = { x0: L.emblem.cx - emW / 2, y0: L.emblem.cy - L.emblem.h / 2, x1: L.emblem.cx + emW / 2, y1: L.emblem.cy + L.emblem.h / 2 };
+    const ew = L.emblem.h * EMBLEM_A;
+    L.emblemRect = { x0: L.emblem.cx - ew / 2, y0: L.emblem.cy - L.emblem.h / 2, x1: L.emblem.cx + ew / 2, y1: L.emblem.cy + L.emblem.h / 2 };
   }
 
   function rectOf(place, a) {
@@ -743,21 +772,6 @@ async function start() {
   let job = null;
   const written = []; // rects of visible writing, newest last
 
-  function triangle() {
-    const corners = [[0.18, 0.0], [0.16, 1.02], [1.02, 0.52], [0.2, 0.0], [0.17, 0.14]];
-    const pts = [];
-    for (let i = 0; i < corners.length - 1; i++) {
-      const [x0, y0] = corners[i];
-      const [x1, y1] = corners[i + 1];
-      for (let k = 0; k < 10; k++) {
-        const t = k / 10;
-        pts.push([x0 + (x1 - x0) * t + rand(-0.012, 0.012), y0 + (y1 - y0) * t + rand(-0.012, 0.012), 0.05]);
-      }
-    }
-    pts.push([...corners[corners.length - 1], 0.05]);
-    return { a: 1.02, ops: [{ s: pts }] };
-  }
-
   function sleeve(rect, rows) {
     const pts = [];
     const rowH = (rect.y1 - rect.y0) / rows;
@@ -771,67 +785,6 @@ async function start() {
       }
     }
     return pts;
-  }
-
-  // Lay out a line of lettering at a place: returns strokes in CSS px with cumulative lengths.
-  function place(data, p) {
-    const c = Math.cos(p.angle || 0);
-    const s = Math.sin(p.angle || 0);
-    const tf = (x, y) => {
-      const lx = (x - data.a / 2) * p.h;
-      const ly = (y - 0.5) * p.h;
-      return [p.cx + c * lx - s * ly, p.cy + s * lx + c * ly];
-    };
-    return data.ops.map((o) => {
-      if (o.d) {
-        const [X, Y] = tf(o.d[0], o.d[1]);
-        return { dot: [X, Y, o.d[2] * p.h] };
-      }
-      const pts = o.s.map(([x, y, w]) => [...tf(x, y), w * p.h]);
-      const cum = [0];
-      for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
-      return { pts, cum };
-    });
-  }
-
-  function write(data, p, opts = {}) {
-    const ops = place(data, p);
-    const widths = ops.filter((o) => o.pts).flatMap((o) => o.pts.map((q) => q[2])).sort((x, y) => x - y);
-    const wMed = widths[widths.length >> 1] || 1;
-    const R = Math.max(opts.minR ?? (portrait ? 3.4 : 4), p.h * (opts.finger ?? 0.042));
-    const j = {
-      ops,
-      i: 0,
-      s: 0,
-      wait: opts.delay ?? 0.3,
-      R,
-      wMed,
-      h: p.h,
-      v: opts.speed ?? 240 + p.h * 1.05,
-      pause: opts.pause ?? 1,
-      mem: opts.mem ?? 1,
-      wet: opts.wet ?? 0.7,
-      drip: reduceMotion ? 0 : opts.drip ?? 0.2,
-      onStart: opts.onStart,
-      onDone: opts.onDone,
-      box: inkBox(ops),
-    };
-    if (opts.instant) {
-      for (const op of ops) {
-        if (op.dot) {
-          stamp(B.marks, op.dot[0], op.dot[1], op.dot[0] + 0.01, op.dot[1], R, R, 1.5, 1, 0, j.mem);
-          continue;
-        }
-        for (let k = 1; k < op.pts.length; k++) {
-          const a = op.pts[k - 1];
-          const b = op.pts[k];
-          stamp(B.marks, a[0], a[1], b[0], b[1], radius(j, a[2]), radius(j, b[2]), 1.5, 1, 0, j.mem);
-        }
-      }
-      return j;
-    }
-    queue.push(j);
-    return j;
   }
 
   function radius(j, w) {
@@ -939,6 +892,95 @@ async function start() {
         job.wait = (0.07 + rand(0.16)) * job.pause;
       }
     }
+  }
+
+  /* -------------------------------------------------------- calligraphy */
+
+  // A line appears the way a reed pen would write it on the fogged glass; the masks know,
+  // per pixel, when the pen gets there. 'play' is the ▶ mark, drawn in the shader.
+  const glyphs = [];
+
+  function glyphMeta(key) {
+    return key === 'play' ? { a: 1, m: 0, len: 1.5, drips: [] } : glass[key];
+  }
+
+  function glyphBox(key, p) {
+    const g = glyphMeta(key);
+    const w = p.h * g.a;
+    return { x0: p.cx - w / 2, y0: p.cy - p.h / 2, x1: p.cx + w / 2, y1: p.cy + p.h / 2 };
+  }
+
+  function writeGlyph(key, p, opts = {}) {
+    const meta = glyphMeta(key);
+    const g = {
+      key,
+      meta,
+      p,
+      start: T + (opts.delay ?? 0),
+      tau: opts.instant ? 2 : 0,
+      dur: opts.dur ?? clamp(meta.len * (opts.pace ?? 0.4), 0.5, 7),
+      mem: opts.mem ?? 1,
+      wet: opts.wet ?? 0.6,
+      clear: !opts.memOnly,
+      drip: reduceMotion ? 0 : opts.drip ?? 0,
+      next: 0,
+      onDone: opts.onDone,
+      done: false,
+      box: glyphBox(key, p),
+    };
+    glyphs.push(g);
+    return g;
+  }
+
+  function stepGlyphs(dt) {
+    for (const g of glyphs) {
+      if (g.done || T < g.start) continue;
+      g.tau += dt / g.dur;
+      const drips = g.meta.drips;
+      while (g.next < drips.length && drips[g.next][2] <= g.tau) {
+        const [x, y] = drips[g.next++];
+        if (!chance(g.drip)) continue;
+        const c = Math.cos(g.p.angle || 0);
+        const s = Math.sin(g.p.angle || 0);
+        const lx = (x - g.meta.a / 2) * g.p.h;
+        const ly = (y - 0.5) * g.p.h + g.p.h * 0.03;
+        pendingDrips.push({ t: T + rand(0.6, 4.5), x: g.p.cx + c * lx - s * ly, y: g.p.cy + s * lx + c * ly, r: clamp(g.p.h * 0.022, 2.2, 5) });
+      }
+    }
+  }
+
+  function drawGlyphs(mode) {
+    let used = false;
+    for (const g of glyphs) {
+      if (g.done || T < g.start || (mode === 0 && !g.clear)) continue;
+      if (!used) {
+        gl.useProgram(P.glyph.p);
+        gl.uniform2f(P.glyph.u.uView, W, H);
+        gl.uniform1i(P.glyph.u.uMode, mode);
+        used = true;
+      }
+      const u = P.glyph.u;
+      const { a, m } = g.meta;
+      gl.uniform4f(u.uRect, g.p.cx, g.p.cy, (a + 2 * m) * g.p.h, (1 + 2 * m) * g.p.h);
+      gl.uniform1f(u.uAngle, g.p.angle || 0);
+      gl.uniform1i(u.uKind, g.key === 'play' ? 1 : 0);
+      gl.uniform1f(u.uTau, g.tau);
+      gl.uniform1f(u.uSoft, 0.025);
+      gl.uniform1f(u.uMem, g.mem);
+      gl.uniform1f(u.uWet, g.wet);
+      if (g.key !== 'play') gl.bindTexture(gl.TEXTURE_2D, glassTex[g.key]);
+      full4();
+    }
+  }
+
+  function finishGlyphs() {
+    for (const g of glyphs) {
+      if (!g.done && g.tau >= 1.03) {
+        g.done = true;
+        g.onDone?.(g);
+      }
+    }
+    for (let i = glyphs.length - 1; i >= 0; i--) if (glyphs[i].done) glyphs.splice(i, 1);
   }
 
   /* -------------------------------------------------------------- drips */
@@ -1476,7 +1518,6 @@ async function start() {
     regrow = 1;
     if (source === teaser || pendingSource === teaser) switchSource(outside);
     duck();
-    if (letters) write(letters.name, jitter(L.name), { delay: 3.5, mem: 1, drip: 0.35 });
   }
 
   teaser.addEventListener('playing', () => {
@@ -1497,10 +1538,6 @@ async function start() {
   let verseIndex = 0;
   let verseH = 1;
 
-  function jitter(p) {
-    return { ...p, cx: p.cx + rand(-2, 2), cy: p.cy + rand(-2, 2), angle: p.angle + rand(-0.01, 0.01) };
-  }
-
   function reveal(el, box, pad) {
     placeHit(el, box, pad);
     el.hidden = false;
@@ -1508,23 +1545,24 @@ async function start() {
 
   function nextVerse() {
     const key = verseKeys[verseIndex % verseKeys.length];
-    const data = letters[key];
+    const a = glass[key].a;
     const margin = Math.max(18, Math.min(W, H) * 0.05);
-    let h = (portrait ? clamp(H * 0.06, 38, 60) : clamp(H * 0.095, 56, 104)) * verseH;
-    h = Math.min(h, (W - margin * 2) / data.a);
-    const fixed = [rectOf(L.name, letters.name.a), rectOf(L.album, letters.album.a), rectOf(L.play, 1), L.emblemRect, rectOf(L.hidden, letters.v4.a), rectOf(L.handle, letters.handle.a), rectOf(L.sound, letters.sound.a)];
+    let h = (portrait ? clamp(H * 0.055, 36, 54) : clamp(H * 0.085, 54, 96)) * verseH;
+    h = Math.min(h, (W - margin * 2) / a);
+    const quiet = [glyphBox('v4', L.hidden), glyphBox('breathe', L.breathe)];
+    const fixed = [L.emblemRect, glyphBox('album', L.album), glyphBox('play', L.play), glyphBox('handle', L.handle), glyphBox('sound', L.sound)];
     const recent = written.slice(-3);
     for (let tries = 0; tries < 80; tries++) {
-      const w = h * data.a;
+      const w = h * a;
       const cx = margin + w / 2 + rand(Math.max(0, W - margin * 2 - w));
       const cy = margin + h / 2 + rand(Math.max(0, H - margin * 2 - h - 40));
-      const p = { cx, cy, h, angle: rand(-0.07, 0.07) };
-      const box = rectOf(p, data.a);
-      if (fixed.some((r) => overlaps(r, box, 14)) || recent.some((r) => overlaps(r, box, 10))) continue;
+      const p = { cx, cy, h, angle: rand(-0.06, 0.06) };
+      const box = glyphBox(key, p);
+      if (fixed.some((r) => overlaps(r, box, 20)) || quiet.some((r) => overlaps(r, box, 60)) || recent.some((r) => overlaps(r, box, 10))) continue;
       verseIndex++;
       verseH = 1;
       written.push(box);
-      write(data, p, { delay: 0.2, mem: 0.75, drip: 0.14, wet: 0.6 });
+      writeGlyph(key, p, { delay: 0.2, mem: 0.75, drip: 0.12, wet: 0.5, pace: 0.5 });
       return;
     }
     verseH = Math.max(0.6, verseH * 0.85);
@@ -1533,26 +1571,25 @@ async function start() {
   function scheduleIntro() {
     const intro = !reduceMotion;
     const t0 = T;
-    write(letters.name, L.name, { delay: intro ? Math.max(0.6, 3.1 - T) : 0.6, mem: 1, drip: 0.4 });
-    write(letters.album, L.album, { delay: 0.55, mem: 1, drip: 0.25 });
-    write(triangle(), L.play, { delay: 0.3, mem: 1, drip: 0.2, onDone: (j) => reveal(playBtn, j.box, 16) });
-    write(letters.sound, L.sound, { delay: 1.4, mem: 1, drip: 0, minR: 2.2, finger: 0.05, speed: 420, pause: 0.4, onDone: (j) => reveal(soundBtn, j.box, 12) });
-    write(letters.handle, L.handle, { delay: 0.35, mem: 1, drip: 0, minR: 2, finger: 0.055, speed: 640, pause: 0.25, onDone: (j) => reveal(handleLink, j.box, 10) });
-    write(letters.v4, L.hidden, { instant: true, mem: 0.42 });
-    emblemImg.then((img) => {
-      if (img) pressEmblem(img);
+    const first = intro ? Math.max(0.5, 4.2 - T) : 0.5;
+    const album = writeGlyph('album', L.album, { delay: first, mem: 1, drip: 0.35, pace: 0.45 });
+    const play = writeGlyph('play', L.play, { delay: first + album.dur + 0.4, dur: 0.6, mem: 1, onDone: (g) => reveal(playBtn, g.box, 14) });
+    const sound = writeGlyph('sound', L.sound, { delay: first + album.dur + 1.6, mem: 1, pace: 0.3, onDone: (g) => reveal(soundBtn, g.box, 12) });
+    writeGlyph('handle', L.handle, { delay: first + album.dur + 1.9 + sound.dur, dur: 1.4, mem: 1, onDone: (g) => reveal(handleLink, g.box, 10) });
+    writeGlyph('v4', L.hidden, { instant: true, memOnly: true, mem: 0.42, wet: 0 });
+    if (maskTex) maskPending = true;
+    else emblemImg.then((img) => img && pressEmblem(img));
+    at(t0 + 18, nextVerse);
+    at(t0 + 31, () => {
+      writeGlyph('breathe', L.breathe, {
+        mem: 0.75,
+        pace: 0.4,
+        onDone: () => at(T + 1.1, () => breathe(L.hidden.cx, L.hidden.cy, Math.max(L.hidden.h * glass.v4.a * 0.78, 100), 2.4, 1.2)),
+      });
     });
-    at(t0 + 17, nextVerse);
-    at(t0 + 33, () => {
-      write(letters.breathe, L.breathe, { delay: 0.2, mem: 0.75, drip: 0.1, onDone: () => at(T + 1.1, () => breathe(L.emblem.cx, L.emblem.cy, L.emblem.h * 0.78, 2.2, 1.1)) });
-    });
-    at(t0 + 52, function verses() {
+    at(t0 + 50, function verses() {
       nextVerse();
       at(T + rand(15, 23), verses);
-    });
-    at(t0 + 115, function retrace() {
-      if (!teaserOn) write(letters.name, jitter(L.name), { delay: 0.2, mem: 1, drip: 0.3 });
-      at(T + rand(85, 110), retrace);
     });
     if (!reduceMotion) {
       at(t0 + rand(4, 7), function condensation() {
@@ -1574,30 +1611,46 @@ async function start() {
   /* ------------------------------------------------------------- emblem */
 
   let maskTex = null;
-  let maskAspect = 552 / 702;
   let maskPending = false;
 
   function pressEmblem(img) {
-    const h = 384;
-    const w = Math.round(h * maskAspect);
+    const h = 1024;
+    const w = Math.round(h * EMBLEM_A);
     const c = document.createElement('canvas');
     c.width = w;
     c.height = h;
-    const ctx = c.getContext('2d');
-    ctx.filter = 'blur(1px)';
-    for (let k = 0; k < 8; k++) {
-      const a = (k / 8) * Math.PI * 2;
-      ctx.drawImage(img, Math.cos(a) * 2.2, Math.sin(a) * 2.2, w, h);
-    }
+    c.getContext('2d').drawImage(img, 0, 0, w, h);
     if (!maskTex) maskTex = gl.createTexture();
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, maskTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, c);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     maskPending = true;
+  }
+
+  async function loadGlass() {
+    const res = await fetch('assets/data/glass/glass.json');
+    const meta = await res.json();
+    await Promise.all(Object.entries(meta).map(async ([key, g]) => {
+      const img = await loadImage(`assets/data/glass/${g.f}`);
+      const t = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      glassTex[key] = t;
+    }));
+    return meta;
   }
 
   /* ------------------------------------------------------------- render */
@@ -1678,14 +1731,18 @@ async function start() {
     gl.bindTexture(gl.TEXTURE_2D, fogA.tex);
     full();
     gl.enable(gl.BLEND);
+    gl.blendEquation(gl.MIN);
     if (B.wipes.n) {
-      gl.blendEquation(gl.MIN);
       useStamp(0);
       drawInstances(B.wipes);
-      gl.blendEquation(gl.MAX);
+    }
+    drawGlyphs(0);
+    gl.blendEquation(gl.MAX);
+    if (B.wipes.n) {
       useStamp(1);
       drawInstances(B.wipes);
     }
+    drawGlyphs(1);
     if (B.marks.n) {
       gl.blendEquation(gl.MAX);
       useStamp(1);
@@ -1696,9 +1753,9 @@ async function start() {
       gl.useProgram(P.mask.p);
       const m = P.mask.u;
       gl.uniform2f(m.uView, W, H);
-      gl.uniform4f(m.uRect, L.emblem.cx, L.emblem.cy, L.emblem.h * maskAspect, L.emblem.h);
-      gl.uniform1f(m.uAngle, -0.04);
-      gl.uniform1f(m.uMem, 0.42);
+      gl.uniform4f(m.uRect, L.emblem.cx, L.emblem.cy, L.emblem.h * EMBLEM_A, L.emblem.h);
+      gl.uniform1f(m.uAngle, 0);
+      gl.uniform1f(m.uMem, 1);
       gl.bindTexture(gl.TEXTURE_2D, maskTex);
       full4();
       maskPending = false;
@@ -1789,6 +1846,7 @@ async function start() {
     simulate(dt);
     render(dt, reduceMotion ? 0 : flashValue());
     endFrame();
+    finishGlyphs();
   }
 
   function endFrame() {
@@ -1818,13 +1876,14 @@ async function start() {
     pumpScene();
 
     intensity = clamp(0.62 + 0.3 * Math.sin(T * 0.071) + 0.16 * Math.sin(T * 0.23 + 1.3), 0.3, 1);
-    if (letters) runEvents();
+    if (glass) runEvents();
     if (!reduceMotion && T > nextFlash) {
       lightning();
       nextFlash = T + rand(24, 55);
     }
     stepPointer();
     stepWriter(dt);
+    stepGlyphs(dt);
     stepBreath(dt);
     stepDrips(dt);
     stepRain(dt * (reduceMotion ? 0.35 : 1));
@@ -1858,12 +1917,13 @@ async function start() {
     pendingDrips.length = 0;
     breaths.length = 0;
     written.length = 0;
+    glyphs.length = 0;
     [playBtn, soundBtn, handleLink].forEach((el) => (el.hidden = true));
     if (force) T = 0;
     fogFrom = T + (force ? 1.1 : 0);
     fogUntil = fogFrom + 3;
     nextFlash = Math.max(nextFlash, T + 20);
-    if (letters) {
+    if (glass) {
       layout();
       scheduleIntro();
     }
@@ -1898,6 +1958,7 @@ async function start() {
           simulate(step);
           render(step, 0, false);
           endFrame();
+          finishGlyphs();
         }
         return T;
       },
@@ -1911,8 +1972,7 @@ async function start() {
   requestAnimationFrame(tick);
 
   try {
-    const res = await fetch('assets/data/letters.json');
-    letters = await res.json();
+    glass = await loadGlass();
     layout();
     scheduleIntro();
   } catch (err) {
